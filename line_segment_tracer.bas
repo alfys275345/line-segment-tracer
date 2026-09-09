@@ -1,16 +1,34 @@
 ' Line Segment Tracer - QB64 Basic Variant
 ' A library for tracing line segments, identifying junctions, and detecting loops
+' Updated to use LineSeg type with polyline tracking
 
-' Type definitions
 TYPE Point
     x AS DOUBLE
     y AS DOUBLE
 END TYPE
 
-TYPE LineSegment
-    startPoint AS Point
-    endPoint AS Point
-    segmentID AS LONG
+TYPE LineSeg
+    x1 AS DOUBLE
+    y1 AS DOUBLE
+    x2 AS DOUBLE
+    y2 AS DOUBLE
+    p1 AS Point
+    p2 AS Point
+
+    Sn AS DOUBLE ' Sine of angle
+    Cs AS DOUBLE ' Cosine of angle
+    Ang AS DOUBLE ' Angle
+    Dist AS DOUBLE ' Distance/Length
+
+    Trim1 AS DOUBLE ' Trim start
+    Trim2 AS DOUBLE ' Trim end
+
+    ringId AS INTEGER ' Ring/Loop identifier
+    active AS INTEGER ' 0=inactive, -1=active
+    selected AS INTEGER ' 0=not selected, -1=selected
+    pocket AS INTEGER ' Pocket identifier
+    bad AS INTEGER ' 0=valid, -1=invalid
+    count AS INTEGER ' Reference count
 END TYPE
 
 TYPE Junction
@@ -21,9 +39,11 @@ END TYPE
 
 TYPE Statistics
     totalSegments AS LONG
+    activeSegments AS LONG
     totalLength AS DOUBLE
     totalJunctions AS LONG
     loopsFound AS LONG
+    selectedSegments AS LONG
 END TYPE
 
 ' Global arrays and variables
@@ -32,31 +52,82 @@ CONST MAX_JUNCTIONS = 5000
 CONST MAX_LOOPS = 1000
 CONST TOLERANCE = 0.000000001
 
-DIM SHARED segments(1 TO MAX_SEGMENTS) AS LineSegment
+DIM SHARED lineSegs(1 TO MAX_SEGMENTS) AS LineSeg
 DIM SHARED junctions(1 TO MAX_JUNCTIONS) AS Junction
-DIM SHARED loops(1 TO MAX_LOOPS, 1 TO MAX_SEGMENTS) AS LONG ' Array of loop paths
-DIM SHARED loopSizes(1 TO MAX_LOOPS) AS LONG ' Size of each loop
 DIM SHARED segmentCount AS LONG
 DIM SHARED junctionCount AS LONG
 DIM SHARED loopCount AS LONG
-DIM SHARED adjacencyList(1 TO MAX_JUNCTIONS, 1 TO MAX_JUNCTIONS) AS LONG
-DIM SHARED adjacencySize(1 TO MAX_JUNCTIONS) AS LONG
+DIM SHARED nextRingId AS INTEGER
 
 ' Initialize tracer
 SUB InitializeTracer
+    DIM i AS LONG
+    
     segmentCount = 0
     junctionCount = 0
     loopCount = 0
+    nextRingId = 1
     
-    DIM i AS LONG
-    FOR i = 1 TO MAX_JUNCTIONS
-        adjacencySize(i) = 0
+    FOR i = 1 TO MAX_SEGMENTS
+        lineSegs(i).active = 0
+        lineSegs(i).selected = 0
+        lineSegs(i).bad = 0
+        lineSegs(i).ringId = 0
+        lineSegs(i).pocket = 0
+        lineSegs(i).count = 0
+        lineSegs(i).Trim1 = 0
+        lineSegs(i).Trim2 = 0
     NEXT i
     
-    FOR i = 1 TO MAX_LOOPS
-        loopSizes(i) = 0
+    FOR i = 1 TO MAX_JUNCTIONS
+        junctions(i).point.x = 0
+        junctions(i).point.y = 0
+        junctions(i).connectedCount = 0
+        junctions(i).degree = 0
     NEXT i
 END SUB
+
+' Calculate segment properties (angle, sine, cosine, distance)
+SUB CalculateSegmentProperties(segIndex AS LONG)
+    DIM dx AS DOUBLE, dy AS DOUBLE, len AS DOUBLE
+    
+    dx = lineSegs(segIndex).x2 - lineSegs(segIndex).x1
+    dy = lineSegs(segIndex).y2 - lineSegs(segIndex).y1
+    
+    len = SQR(dx * dx + dy * dy)
+    lineSegs(segIndex).Dist = len
+    
+    IF len > TOLERANCE THEN
+        lineSegs(segIndex).Cs = dx / len
+        lineSegs(segIndex).Sn = dy / len
+        lineSegs(segIndex).Ang = ATN2(dy, dx)
+    ELSE
+        lineSegs(segIndex).Cs = 0
+        lineSegs(segIndex).Sn = 0
+        lineSegs(segIndex).Ang = 0
+    END IF
+END SUB
+
+' ATN2 function (arctangent of y/x)
+FUNCTION ATN2(y AS DOUBLE, x AS DOUBLE) AS DOUBLE
+    IF x > 0 THEN
+        ATN2 = ATN(y / x)
+    ELSEIF x < 0 THEN
+        IF y >= 0 THEN
+            ATN2 = ATN(y / x) + 3.14159265
+        ELSE
+            ATN2 = ATN(y / x) - 3.14159265
+        END IF
+    ELSE
+        IF y > 0 THEN
+            ATN2 = 3.14159265 / 2
+        ELSEIF y < 0 THEN
+            ATN2 = -3.14159265 / 2
+        ELSE
+            ATN2 = 0
+        END IF
+    END IF
+END FUNCTION
 
 ' Create a point
 FUNCTION CreatePoint(x AS DOUBLE, y AS DOUBLE) AS Point
@@ -107,60 +178,117 @@ FUNCTION FindOrCreateJunction(p AS Point) AS LONG
     END IF
 END FUNCTION
 
-' Add a line segment
-FUNCTION AddSegment(startPoint AS Point, endPoint AS Point, segID AS LONG) AS LONG
+' Add a line segment and mark as active
+FUNCTION AddSegment(x1 AS DOUBLE, y1 AS DOUBLE, x2 AS DOUBLE, y2 AS DOUBLE) AS LONG
+    DIM startPoint AS Point, endPoint AS Point, startJunc AS LONG, endJunc AS LONG
+    
     IF segmentCount >= MAX_SEGMENTS THEN
         AddSegment = -1
         EXIT FUNCTION
     END IF
     
     segmentCount = segmentCount + 1
-    segments(segmentCount).startPoint = startPoint
-    segments(segmentCount).endPoint = endPoint
-    segments(segmentCount).segmentID = segID
     
-    DIM startJunc AS LONG, endJunc AS LONG
+    ' Set coordinates and points
+    lineSegs(segmentCount).x1 = x1
+    lineSegs(segmentCount).y1 = y1
+    lineSegs(segmentCount).x2 = x2
+    lineSegs(segmentCount).y2 = y2
+    
+    startPoint = CreatePoint(x1, y1)
+    endPoint = CreatePoint(x2, y2)
+    
+    lineSegs(segmentCount).p1 = startPoint
+    lineSegs(segmentCount).p2 = endPoint
+    
+    ' Mark as active
+    lineSegs(segmentCount).active = -1
+    lineSegs(segmentCount).count = 1
+    
+    ' Calculate geometric properties
+    CalculateSegmentProperties segmentCount
+    
+    ' Create/find junctions
     startJunc = FindOrCreateJunction(startPoint)
     endJunc = FindOrCreateJunction(endPoint)
     
     IF startJunc > 0 AND endJunc > 0 THEN
         junctions(startJunc).degree = junctions(startJunc).degree + 1
         junctions(endJunc).degree = junctions(endJunc).degree + 1
-        
-        ' Add to adjacency list
-        IF adjacencySize(startJunc) < MAX_JUNCTIONS THEN
-            adjacencySize(startJunc) = adjacencySize(startJunc) + 1
-            adjacencyList(startJunc, adjacencySize(startJunc)) = endJunc
-        END IF
-        
-        IF adjacencySize(endJunc) < MAX_JUNCTIONS THEN
-            adjacencySize(endJunc) = adjacencySize(endJunc) + 1
-            adjacencyList(endJunc, adjacencySize(endJunc)) = startJunc
-        END IF
     END IF
     
     AddSegment = segmentCount
 END FUNCTION
 
-' Find segment connecting two points
-FUNCTION FindSegment(p1 AS Point, p2 AS Point) AS LONG
-    DIM i AS LONG
+' Find segment connecting two points by coordinates
+FUNCTION FindSegmentByCoords(x1 AS DOUBLE, y1 AS DOUBLE, x2 AS DOUBLE, y2 AS DOUBLE) AS LONG
+    DIM i AS LONG, p1 AS Point, p2 AS Point
+    
+    p1 = CreatePoint(x1, y1)
+    p2 = CreatePoint(x2, y2)
     
     FOR i = 1 TO segmentCount
-        IF (PointsEqual(segments(i).startPoint, p1) AND PointsEqual(segments(i).endPoint, p2)) OR _
-           (PointsEqual(segments(i).startPoint, p2) AND PointsEqual(segments(i).endPoint, p1)) THEN
-            FindSegment = i
-            EXIT FUNCTION
+        IF lineSegs(i).active THEN
+            IF (PointsEqual(lineSegs(i).p1, p1) AND PointsEqual(lineSegs(i).p2, p2)) OR _
+               (PointsEqual(lineSegs(i).p1, p2) AND PointsEqual(lineSegs(i).p2, p1)) THEN
+                FindSegmentByCoords = i
+                EXIT FUNCTION
+            END IF
         END IF
     NEXT i
     
-    FindSegment = -1
+    FindSegmentByCoords = -1
 END FUNCTION
 
-' Calculate segment length
-FUNCTION SegmentLength(segIndex AS LONG) AS DOUBLE
-    SegmentLength = PointDistance(segments(segIndex).startPoint, segments(segIndex).endPoint)
-END FUNCTION
+' Mark segment as inactive
+SUB DeactivateSegment(segIndex AS LONG)
+    IF segIndex >= 1 AND segIndex <= MAX_SEGMENTS THEN
+        lineSegs(segIndex).active = 0
+    END IF
+END SUB
+
+' Mark segment as selected
+SUB SelectSegment(segIndex AS LONG)
+    IF segIndex >= 1 AND segIndex <= MAX_SEGMENTS AND lineSegs(segIndex).active THEN
+        lineSegs(segIndex).selected = -1
+    END IF
+END SUB
+
+' Deselect segment
+SUB DeselectSegment(segIndex AS LONG)
+    IF segIndex >= 1 AND segIndex <= MAX_SEGMENTS THEN
+        lineSegs(segIndex).selected = 0
+    END IF
+END SUB
+
+' Mark segment as bad
+SUB MarkSegmentBad(segIndex AS LONG)
+    IF segIndex >= 1 AND segIndex <= MAX_SEGMENTS AND lineSegs(segIndex).active THEN
+        lineSegs(segIndex).bad = -1
+    END IF
+END SUB
+
+' Assign segment to ring/loop
+SUB AssignSegmentToRing(segIndex AS LONG, ringId AS INTEGER)
+    IF segIndex >= 1 AND segIndex <= MAX_SEGMENTS AND lineSegs(segIndex).active THEN
+        lineSegs(segIndex).ringId = ringId
+    END IF
+END SUB
+
+' Assign segment to pocket
+SUB AssignSegmentToPocket(segIndex AS LONG, pocketId AS INTEGER)
+    IF segIndex >= 1 AND segIndex <= MAX_SEGMENTS AND lineSegs(segIndex).active THEN
+        lineSegs(segIndex).pocket = pocketId
+    END IF
+END SUB
+
+' Trim segment
+SUB TrimSegment(segIndex AS LONG, trim1 AS DOUBLE, trim2 AS DOUBLE)
+    IF segIndex >= 1 AND segIndex <= MAX_SEGMENTS AND lineSegs(segIndex).active THEN
+        lineSegs(segIndex).Trim1 = trim1
+        lineSegs(segIndex).Trim2 = trim2
+    END IF
+END SUB
 
 ' Find all junctions (degree >= 2)
 SUB FindJunctions(juncIndices() AS LONG, count AS LONG)
@@ -180,15 +308,28 @@ END SUB
 ' Calculate statistics
 SUB CalculateStatistics(stats AS Statistics)
     DIM i AS LONG
+    DIM activeCount AS LONG, selectedCount AS LONG
     
     stats.totalSegments = segmentCount
     stats.totalJunctions = junctionCount
     stats.loopsFound = loopCount
     stats.totalLength = 0
+    activeCount = 0
+    selectedCount = 0
     
     FOR i = 1 TO segmentCount
-        stats.totalLength = stats.totalLength + SegmentLength(i)
+        IF lineSegs(i).active THEN
+            stats.totalLength = stats.totalLength + lineSegs(i).Dist
+            activeCount = activeCount + 1
+        END IF
+        
+        IF lineSegs(i).selected THEN
+            selectedCount = selectedCount + 1
+        END IF
     NEXT i
+    
+    stats.activeSegments = activeCount
+    stats.selectedSegments = selectedCount
 END SUB
 
 ' Print point information
@@ -198,26 +339,46 @@ END SUB
 
 ' Print segment information
 SUB PrintSegment(segIndex AS LONG)
-    PRINT "Segment "; segIndex; ": ";
-    PrintPoint segments(segIndex).startPoint
-    PRINT " -> ";
-    PrintPoint segments(segIndex).endPoint
+    IF segIndex >= 1 AND segIndex <= MAX_SEGMENTS AND lineSegs(segIndex).active THEN
+        PRINT "Segment "; segIndex; ": ("; lineSegs(segIndex).x1; ", "; _
+              lineSegs(segIndex).y1; ") -> ("; lineSegs(segIndex).x2; ", "; _
+              lineSegs(segIndex).y2; ")";
+        PRINT " [Len:"; lineSegs(segIndex).Dist; " Ang:"; lineSegs(segIndex).Ang; "]";
+        
+        IF lineSegs(segIndex).ringId > 0 THEN
+            PRINT " [Ring:"; lineSegs(segIndex).ringId; "]";
+        END IF
+        
+        IF lineSegs(segIndex).selected THEN
+            PRINT " [SELECTED]";
+        END IF
+        
+        IF lineSegs(segIndex).bad THEN
+            PRINT " [BAD]";
+        END IF
+        
+        PRINT
+    END IF
 END SUB
 
 ' Print junction information
 SUB PrintJunction(juncIndex AS LONG)
-    PRINT "Junction(";
-    PrintPoint junctions(juncIndex).point
-    PRINT ", degree="; junctions(juncIndex).degree; ")";
+    IF juncIndex >= 1 AND juncIndex <= junctionCount THEN
+        PRINT "Junction(";
+        PrintPoint junctions(juncIndex).point
+        PRINT ", degree="; junctions(juncIndex).degree; ")";
+    END IF
 END SUB
 
-' Print all segments
+' Print all active segments
 SUB PrintAllSegments
     DIM i AS LONG
     
-    PRINT "=== All Segments ==="
+    PRINT "=== All Active Segments ==="
     FOR i = 1 TO segmentCount
-        PrintSegment i
+        IF lineSegs(i).active THEN
+            PrintSegment i
+        END IF
     NEXT i
     PRINT
 END SUB
@@ -243,16 +404,20 @@ SUB PrintStatistics
     
     PRINT "=== Statistics ==="
     PRINT "Total Segments: "; stats.totalSegments
+    PRINT "Active Segments: "; stats.activeSegments
+    PRINT "Selected Segments: "; stats.selectedSegments
     PRINT "Total Length: "; stats.totalLength
     PRINT "Total Junctions: "; stats.totalJunctions
     PRINT "Loops Found: "; stats.loopsFound
     PRINT
 END SUB
 
-' Trace a polyline from starting point
-SUB TracePolyline(startPoint AS Point, pathSegments() AS LONG, pathCount AS LONG)
+' Trace a polyline from starting segment, marking connected segments
+SUB TracePolyline(startSegIndex AS LONG, pathSegments() AS LONG, pathCount AS LONG)
     DIM visited(MAX_SEGMENTS) AS LONG
-    DIM currentJunc AS LONG, nextJunc AS LONG, segIndex AS LONG, i AS LONG, j AS LONG
+    DIM currentX1 AS DOUBLE, currentY1 AS DOUBLE
+    DIM currentX2 AS DOUBLE, currentY2 AS DOUBLE
+    DIM nextSegIndex AS LONG, i AS LONG, j AS LONG
     
     pathCount = 0
     FOR i = 1 TO MAX_SEGMENTS
@@ -260,26 +425,48 @@ SUB TracePolyline(startPoint AS Point, pathSegments() AS LONG, pathCount AS LONG
         pathSegments(i) = 0
     NEXT i
     
-    currentJunc = FindOrCreateJunction(startPoint)
-    IF currentJunc < 0 THEN EXIT SUB
+    IF startSegIndex < 1 OR startSegIndex > MAX_SEGMENTS THEN EXIT SUB
+    IF NOT lineSegs(startSegIndex).active THEN EXIT SUB
     
+    ' Start from first segment
+    pathCount = 1
+    pathSegments(1) = startSegIndex
+    visited(startSegIndex) = -1
+    
+    currentX2 = lineSegs(startSegIndex).x2
+    currentY2 = lineSegs(startSegIndex).y2
+    
+    ' Continue tracing
     DO
         DIM foundNext AS LONG
         foundNext = 0
         
-        FOR i = 1 TO adjacencySize(currentJunc)
-            nextJunc = adjacencyList(currentJunc, i)
-            segIndex = FindSegment(junctions(currentJunc).point, junctions(nextJunc).point)
-            
-            IF segIndex > 0 AND visited(segIndex) = 0 THEN
-                pathCount = pathCount + 1
-                IF pathCount <= UBOUND(pathSegments) THEN
-                    pathSegments(pathCount) = segIndex
+        FOR i = 1 TO segmentCount
+            IF lineSegs(i).active AND visited(i) = 0 THEN
+                ' Check if this segment connects
+                IF ABS(lineSegs(i).x1 - currentX2) < TOLERANCE AND _
+                   ABS(lineSegs(i).y1 - currentY2) < TOLERANCE THEN
+                    pathCount = pathCount + 1
+                    IF pathCount <= UBOUND(pathSegments) THEN
+                        pathSegments(pathCount) = i
+                    END IF
+                    visited(i) = -1
+                    currentX2 = lineSegs(i).x2
+                    currentY2 = lineSegs(i).y2
+                    foundNext = -1
+                    EXIT FOR
+                ELSEIF ABS(lineSegs(i).x2 - currentX2) < TOLERANCE AND _
+                       ABS(lineSegs(i).y2 - currentY2) < TOLERANCE THEN
+                    pathCount = pathCount + 1
+                    IF pathCount <= UBOUND(pathSegments) THEN
+                        pathSegments(pathCount) = i
+                    END IF
+                    visited(i) = -1
+                    currentX2 = lineSegs(i).x1
+                    currentY2 = lineSegs(i).y1
+                    foundNext = -1
+                    EXIT FOR
                 END IF
-                visited(segIndex) = -1
-                currentJunc = nextJunc
-                foundNext = -1
-                EXIT FOR
             END IF
         NEXT i
         
@@ -287,19 +474,75 @@ SUB TracePolyline(startPoint AS Point, pathSegments() AS LONG, pathCount AS LONG
     LOOP
 END SUB
 
-' Simple loop detection (basic version)
-SUB FindSimpleLoops
-    DIM i AS LONG, startJunc AS LONG, juncIndices(MAX_JUNCTIONS) AS LONG, count AS LONG
+' Mark a loop by assigning segments to a ringId
+SUB MarkLoop(pathSegments() AS LONG, pathCount AS LONG)
+    DIM i AS LONG, ringId AS INTEGER
     
-    ' For a simple implementation, we'll just report junctions as potential loop points
-    ' A full loop detection would require more complex DFS algorithm
+    loopCount = loopCount + 1
+    ringId = nextRingId
+    nextRingId = nextRingId + 1
     
-    FindJunctions juncIndices(), count
-    
-    PRINT "=== Potential Loop Points ==="
-    FOR i = 1 TO count
-        PRINT "Junction with degree "; junctions(juncIndices(i)).degree; " at ";
-        PrintPoint junctions(juncIndices(i)).point
-        PRINT
+    FOR i = 1 TO pathCount
+        IF pathSegments(i) > 0 THEN
+            AssignSegmentToRing pathSegments(i), ringId
+        END IF
     NEXT i
 END SUB
+
+' Find segments by ring ID
+SUB FindSegmentsByRing(ringId AS INTEGER, segIndices() AS LONG, count AS LONG)
+    DIM i AS LONG
+    count = 0
+    
+    FOR i = 1 TO segmentCount
+        IF lineSegs(i).active AND lineSegs(i).ringId = ringId THEN
+            count = count + 1
+            IF count <= UBOUND(segIndices) THEN
+                segIndices(count) = i
+            END IF
+        END IF
+    NEXT i
+END SUB
+
+' Find segments by pocket ID
+SUB FindSegmentsByPocket(pocketId AS INTEGER, segIndices() AS LONG, count AS LONG)
+    DIM i AS LONG
+    count = 0
+    
+    FOR i = 1 TO segmentCount
+        IF lineSegs(i).active AND lineSegs(i).pocket = pocketId THEN
+            count = count + 1
+            IF count <= UBOUND(segIndices) THEN
+                segIndices(count) = i
+            END IF
+        END IF
+    NEXT i
+END SUB
+
+' Get count of active segments
+FUNCTION CountActiveSegments AS LONG
+    DIM i AS LONG, count AS LONG
+    count = 0
+    
+    FOR i = 1 TO segmentCount
+        IF lineSegs(i).active THEN
+            count = count + 1
+        END IF
+    NEXT i
+    
+    CountActiveSegments = count
+END FUNCTION
+
+' Get count of selected segments
+FUNCTION CountSelectedSegments AS LONG
+    DIM i AS LONG, count AS LONG
+    count = 0
+    
+    FOR i = 1 TO segmentCount
+        IF lineSegs(i).selected THEN
+            count = count + 1
+        END IF
+    NEXT i
+    
+    CountSelectedSegments = count
+END FUNCTION

@@ -1,6 +1,7 @@
 ' Line Segment Tracer - QB64 Basic Variant
 ' A library for tracing line segments, identifying junctions, and detecting loops
 ' Updated to use LineSeg type with polyline tracking
+' NOTE: QB64 cannot return Types, so we use separate x,y coordinates or modify structures by reference
 
 TYPE Point
     x AS DOUBLE
@@ -87,6 +88,12 @@ SUB InitializeTracer
     NEXT i
 END SUB
 
+' Create a point by modifying it by reference (QB64 workaround)
+SUB CreatePoint(x AS DOUBLE, y AS DOUBLE, p AS Point)
+    p.x = x
+    p.y = y
+END SUB
+
 ' Calculate segment properties (angle, sine, cosine, distance)
 SUB CalculateSegmentProperties(segIndex AS LONG)
     DIM dx AS DOUBLE, dy AS DOUBLE, len AS DOUBLE
@@ -129,38 +136,30 @@ FUNCTION ATN2(y AS DOUBLE, x AS DOUBLE) AS DOUBLE
     END IF
 END FUNCTION
 
-' Create a point
-FUNCTION CreatePoint(x AS DOUBLE, y AS DOUBLE) AS Point
-    DIM p AS Point
-    p.x = x
-    p.y = y
-    CreatePoint = p
-END FUNCTION
-
-' Calculate distance between two points
-FUNCTION PointDistance(p1 AS Point, p2 AS Point) AS DOUBLE
+' Calculate distance between two points (by coordinates)
+FUNCTION PointDistance(x1 AS DOUBLE, y1 AS DOUBLE, x2 AS DOUBLE, y2 AS DOUBLE) AS DOUBLE
     DIM dx AS DOUBLE, dy AS DOUBLE
-    dx = p1.x - p2.x
-    dy = p1.y - p2.y
+    dx = x1 - x2
+    dy = y1 - y2
     PointDistance = SQR(dx * dx + dy * dy)
 END FUNCTION
 
-' Check if two points are equal (within tolerance)
-FUNCTION PointsEqual(p1 AS Point, p2 AS Point) AS LONG
-    IF ABS(p1.x - p2.x) < TOLERANCE AND ABS(p1.y - p2.y) < TOLERANCE THEN
+' Check if two points are equal (within tolerance) - by coordinates
+FUNCTION PointsEqual(x1 AS DOUBLE, y1 AS DOUBLE, x2 AS DOUBLE, y2 AS DOUBLE) AS LONG
+    IF ABS(x1 - x2) < TOLERANCE AND ABS(y1 - y2) < TOLERANCE THEN
         PointsEqual = -1
     ELSE
         PointsEqual = 0
     END IF
 END FUNCTION
 
-' Find or create junction for a point
-FUNCTION FindOrCreateJunction(p AS Point) AS LONG
+' Find or create junction for a point (by coordinates)
+FUNCTION FindOrCreateJunction(x AS DOUBLE, y AS DOUBLE) AS LONG
     DIM i AS LONG
     
     ' Search for existing junction
     FOR i = 1 TO junctionCount
-        IF PointsEqual(junctions(i).point, p) THEN
+        IF PointsEqual(junctions(i).point.x, junctions(i).point.y, x, y) THEN
             FindOrCreateJunction = i
             EXIT FUNCTION
         END IF
@@ -169,7 +168,8 @@ FUNCTION FindOrCreateJunction(p AS Point) AS LONG
     ' Create new junction
     IF junctionCount < MAX_JUNCTIONS THEN
         junctionCount = junctionCount + 1
-        junctions(junctionCount).point = p
+        junctions(junctionCount).point.x = x
+        junctions(junctionCount).point.y = y
         junctions(junctionCount).degree = 0
         junctions(junctionCount).connectedCount = 0
         FindOrCreateJunction = junctionCount
@@ -180,7 +180,7 @@ END FUNCTION
 
 ' Add a line segment and mark as active
 FUNCTION AddSegment(x1 AS DOUBLE, y1 AS DOUBLE, x2 AS DOUBLE, y2 AS DOUBLE) AS LONG
-    DIM startPoint AS Point, endPoint AS Point, startJunc AS LONG, endJunc AS LONG
+    DIM startJunc AS LONG, endJunc AS LONG
     
     IF segmentCount >= MAX_SEGMENTS THEN
         AddSegment = -1
@@ -195,11 +195,11 @@ FUNCTION AddSegment(x1 AS DOUBLE, y1 AS DOUBLE, x2 AS DOUBLE, y2 AS DOUBLE) AS L
     lineSegs(segmentCount).x2 = x2
     lineSegs(segmentCount).y2 = y2
     
-    startPoint = CreatePoint(x1, y1)
-    endPoint = CreatePoint(x2, y2)
-    
-    lineSegs(segmentCount).p1 = startPoint
-    lineSegs(segmentCount).p2 = endPoint
+    ' Set Point types
+    lineSegs(segmentCount).p1.x = x1
+    lineSegs(segmentCount).p1.y = y1
+    lineSegs(segmentCount).p2.x = x2
+    lineSegs(segmentCount).p2.y = y2
     
     ' Mark as active
     lineSegs(segmentCount).active = -1
@@ -209,8 +209,8 @@ FUNCTION AddSegment(x1 AS DOUBLE, y1 AS DOUBLE, x2 AS DOUBLE, y2 AS DOUBLE) AS L
     CalculateSegmentProperties segmentCount
     
     ' Create/find junctions
-    startJunc = FindOrCreateJunction(startPoint)
-    endJunc = FindOrCreateJunction(endPoint)
+    startJunc = FindOrCreateJunction(x1, y1)
+    endJunc = FindOrCreateJunction(x2, y2)
     
     IF startJunc > 0 AND endJunc > 0 THEN
         junctions(startJunc).degree = junctions(startJunc).degree + 1
@@ -222,15 +222,14 @@ END FUNCTION
 
 ' Find segment connecting two points by coordinates
 FUNCTION FindSegmentByCoords(x1 AS DOUBLE, y1 AS DOUBLE, x2 AS DOUBLE, y2 AS DOUBLE) AS LONG
-    DIM i AS LONG, p1 AS Point, p2 AS Point
-    
-    p1 = CreatePoint(x1, y1)
-    p2 = CreatePoint(x2, y2)
+    DIM i AS LONG
     
     FOR i = 1 TO segmentCount
         IF lineSegs(i).active THEN
-            IF (PointsEqual(lineSegs(i).p1, p1) AND PointsEqual(lineSegs(i).p2, p2)) OR _
-               (PointsEqual(lineSegs(i).p1, p2) AND PointsEqual(lineSegs(i).p2, p1)) THEN
+            IF (PointsEqual(lineSegs(i).p1.x, lineSegs(i).p1.y, x1, y1) AND _
+                PointsEqual(lineSegs(i).p2.x, lineSegs(i).p2.y, x2, y2)) OR _
+               (PointsEqual(lineSegs(i).p1.x, lineSegs(i).p1.y, x2, y2) AND _
+                PointsEqual(lineSegs(i).p2.x, lineSegs(i).p2.y, x1, y1)) THEN
                 FindSegmentByCoords = i
                 EXIT FUNCTION
             END IF
@@ -332,9 +331,9 @@ SUB CalculateStatistics(stats AS Statistics)
     stats.selectedSegments = selectedCount
 END SUB
 
-' Print point information
-SUB PrintPoint(p AS Point)
-    PRINT "Point("; p.x; ", "; p.y; ")";
+' Print point information (by coordinates)
+SUB PrintPoint(x AS DOUBLE, y AS DOUBLE)
+    PRINT "Point("; x; ", "; y; ")";
 END SUB
 
 ' Print segment information
@@ -365,7 +364,7 @@ END SUB
 SUB PrintJunction(juncIndex AS LONG)
     IF juncIndex >= 1 AND juncIndex <= junctionCount THEN
         PRINT "Junction(";
-        PrintPoint junctions(juncIndex).point
+        CALL PrintPoint(junctions(juncIndex).point.x, junctions(juncIndex).point.y)
         PRINT ", degree="; junctions(juncIndex).degree; ")";
     END IF
 END SUB
@@ -377,7 +376,7 @@ SUB PrintAllSegments
     PRINT "=== All Active Segments ==="
     FOR i = 1 TO segmentCount
         IF lineSegs(i).active THEN
-            PrintSegment i
+            CALL PrintSegment(i)
         END IF
     NEXT i
     PRINT
@@ -388,10 +387,10 @@ SUB PrintAllJunctions
     DIM i AS LONG, juncIndices(MAX_JUNCTIONS) AS LONG, count AS LONG
     
     PRINT "=== All Junctions ==="
-    FindJunctions juncIndices(), count
+    CALL FindJunctions(juncIndices(), count)
     
     FOR i = 1 TO count
-        PrintJunction juncIndices(i)
+        CALL PrintJunction(juncIndices(i))
         PRINT
     NEXT i
 END SUB
@@ -400,7 +399,7 @@ END SUB
 SUB PrintStatistics
     DIM stats AS Statistics
     
-    CalculateStatistics stats
+    CALL CalculateStatistics(stats)
     
     PRINT "=== Statistics ==="
     PRINT "Total Segments: "; stats.totalSegments
@@ -484,7 +483,7 @@ SUB MarkLoop(pathSegments() AS LONG, pathCount AS LONG)
     
     FOR i = 1 TO pathCount
         IF pathSegments(i) > 0 THEN
-            AssignSegmentToRing pathSegments(i), ringId
+            CALL AssignSegmentToRing(pathSegments(i), ringId)
         END IF
     NEXT i
 END SUB
